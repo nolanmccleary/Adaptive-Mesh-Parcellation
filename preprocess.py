@@ -78,6 +78,8 @@ def parcellate(data):
 
 
 def run(cifti_path, out_path):
+    raw_path = out_path.replace('_p.npy', '_raw.npy')
+
     print(f"\n[1] Loading {cifti_path}")
     data = load_cifti(cifti_path)
 
@@ -87,15 +89,22 @@ def run(cifti_path, out_path):
     print("\n[3] Bandpass filter")
     data = bandpass_filter(data, LOWCUT, HIGHCUT, TR)
 
-    print("\n[4] Parcellate")
-    data = parcellate(data)
-
-    print("\n[5] Z-score")
+    print("\n[4] Z-score (grayordinate level)")
     data = zscore(data)
 
-    np.save(out_path, data)
-    print(f"\nSaved: {out_path}  shape={data.shape}")
-    return data
+    print(f"\n[5] Save raw grayordinates → {raw_path}")
+    np.save(raw_path, data)
+    print(f"  Saved: {data.shape}  ({data.nbytes / 1e6:.0f} MB)")
+
+    print("\n[6] Parcellate")
+    parcellated = parcellate(data)
+
+    print("\n[7] Z-score (parcel level)")
+    parcellated = zscore(parcellated)
+
+    np.save(out_path, parcellated)
+    print(f"\nSaved parcellated: {out_path}  shape={parcellated.shape}")
+    return parcellated
 
 
 if __name__ == "__main__":
@@ -103,7 +112,7 @@ if __name__ == "__main__":
     out   = sys.argv[2] if len(sys.argv) > 2 else "data/100307_REST1_LR_p.npy"
     result = run(cifti, out)
 
-    print("\n--- Sanity checks ---")
+    print("\n--- Sanity checks (parcellated) ---")
     print(f"Shape:   {result.shape}  (expect (1200, 379))")
     print(f"Mean:    {result.mean():.4f}  (expect ~0)")
     print(f"Std:     {result.std():.4f}  (expect ~1)")
