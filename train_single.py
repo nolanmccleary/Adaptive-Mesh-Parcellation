@@ -25,6 +25,10 @@ def parse_args():
     p.add_argument("--n_enc",       type=int,   default=4)
     p.add_argument("--n_dec",       type=int,   default=4)
     p.add_argument("--out",         default="data/single_session_model.pt")
+    p.add_argument("--mc_samples",  type=int, default=None,
+                   help="If set, use Monte Carlo MSE loss sampling this many regions per step")
+    p.add_argument("--mc_draws",    type=int, default=50,
+                   help="Number of MC draws per batch at eval time (default 50)")
     return p.parse_args()
 
 
@@ -77,8 +81,21 @@ def main():
         batch_first=True,
     ).to(device)
 
-    loss_fn   = nn.MSELoss()
+    full_mse  = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    use_mc    = args.mc_samples is not None
+    mode_str  = f"MC-MSE (k={args.mc_samples})" if use_mc else "full MSE"
+    print(f"Loss: {mode_str}")
+
+    def mc_loss(pred, target, k):
+        idx = torch.randint(0, pred.shape[-1], (k,), device=pred.device)
+        return full_mse(pred[..., idx], target[..., idx])
+
+    def eval_both(pred, target):
+        mse = full_mse(pred, target).item()
+        mc  = np.mean([mc_loss(pred, target, args.mc_samples).item()
+                       for _ in range(args.mc_draws)]) if use_mc else mse
+        return mse, mc
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -88,24 +105,31 @@ def main():
             y      = y.unsqueeze(1).to(device)
             dec_in = x[:, -1:, :]
             pred   = model(x, dec_in)
-            loss   = loss_fn(pred, y)
+            loss   = mc_loss(pred, y, args.mc_samples) if use_mc else full_mse(pred, y)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             train_losses.append(loss.item())
 
         model.eval()
-        test_losses = []
+        test_mse_list, test_mc_list = [], []
         with torch.no_grad():
             for x, y in test_dl:
                 x      = x.to(device)
                 y      = y.unsqueeze(1).to(device)
                 dec_in = x[:, -1:, :]
                 pred   = model(x, dec_in)
-                test_losses.append(loss_fn(pred, y).item())
+                mse, mc = eval_both(pred, y)
+                test_mse_list.append(mse)
+                test_mc_list.append(mc)
 
-        print(f"Epoch {epoch:>2}  train MSE: {np.mean(train_losses):.4f}  "
-              f"test MSE: {np.mean(test_losses):.4f}")
+        if use_mc:
+            print(f"Epoch {epoch:>2}  train MC-MSE: {np.mean(train_losses):.4f}  "
+                  f"test full-MSE: {np.mean(test_mse_list):.4f}  "
+                  f"test MC-MSE: {np.mean(test_mc_list):.4f}")
+        else:
+            print(f"Epoch {epoch:>2}  train MSE: {np.mean(train_losses):.4f}  "
+                  f"test MSE: {np.mean(test_mse_list):.4f}")
 
     torch.save(model.state_dict(), args.out)
     print(f"\nDone. Model saved to {args.out}")
