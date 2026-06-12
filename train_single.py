@@ -95,6 +95,22 @@ def build_parcel_to_gray(labels, valid_mask):
     return valid_idx, parcel_idx
 
 
+def reparcellate(pred_g, valid_gray_idx, parcel_for_gray, N_parc):
+    """
+    Decode grayordinate predictions back to MMP parcel space via fixed atlas mean.
+    pred_g: (B, 1, G)  →  (B, 1, N_parc)
+    """
+    B      = pred_g.shape[0]
+    device = pred_g.device
+    g_idx  = valid_gray_idx.to(device)
+    p_idx  = parcel_for_gray.to(device)
+    out    = torch.zeros(B, 1, N_parc, device=device)
+    cnt    = torch.zeros(N_parc, device=device)
+    cnt.scatter_add_(0, p_idx, torch.ones(len(p_idx), dtype=torch.float32, device=device))
+    out.scatter_add_(2, p_idx.unsqueeze(0).unsqueeze(0).expand(B, 1, -1), pred_g[:, :, g_idx])
+    return out / cnt.clamp(min=1)
+
+
 def mc_raw_loss_fixed(pred, y_raw, valid_gray_idx, parcel_for_gray, k):
     sample      = torch.randint(0, len(valid_gray_idx), (k,))
     pred_at_g   = pred[:, :, parcel_for_gray[sample]]
@@ -256,7 +272,12 @@ def main():
 
                 for bm_key in args.benchmarks:
                     if bm_key == "mmp":
-                        if not use_bubbles or N_model == N_parc:
+                        if use_bubbles:
+                            pred_g   = torch.cat([pred[:, :, :N_c] @ W_c,
+                                                  pred[:, :, N_c:] @ W_s], dim=-1)
+                            pred_mmp = reparcellate(pred_g, valid_gray_idx, parcel_for_gray, N_parc)
+                            bench_accum["mmp"].append(mse(pred_mmp, y_parc).item())
+                        else:
                             bench_accum["mmp"].append(mse(pred, y_parc).item())
                     elif bm_key == "mc_raw":
                         draws = []
