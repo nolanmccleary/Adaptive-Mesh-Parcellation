@@ -14,6 +14,7 @@ Usage (bubble mode):
 import argparse
 import csv
 import json
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -34,7 +35,7 @@ from bubble_parc import BubbleParcellation, bubble_regularizers
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--manifest",      required=True, help="Manifest CSV from prepare_dataset.py")
-    p.add_argument("--cache_dir",     default="data/",
+    p.add_argument("--cache_dir",     default="data/cache/",
                    help="Directory for preprocessed npy files (downloaded on demand)")
 
     # training
@@ -64,6 +65,8 @@ def parse_args():
     p.add_argument("--lam_coverage",  type=float, default=0.0)
     p.add_argument("--lam_overlap",   type=float, default=0.0)
     p.add_argument("--lam_radius",    type=float, default=0.0)
+    p.add_argument("--save_artifacts", action=argparse.BooleanOptionalAction, default=True,
+                   help="Save per-epoch npz artifacts for viz.py (bubble mode only)")
 
     # output — run dir is auto-named; override with --run_dir
     p.add_argument("--run_dir",       default=None,
@@ -201,7 +204,8 @@ def main():
     rows, params = load_manifest(args.manifest)
     print(f"Manifest: {len(rows)} rows  |  Params: {params}")
 
-    use_bubbles = (args.n_cortical is not None) or (args.n_subcortical is not None)
+    use_bubbles    = (args.n_cortical is not None) or (args.n_subcortical is not None)
+    save_artifacts = use_bubbles and args.save_artifacts
     N_c = args.n_cortical    or 360
     N_s = args.n_subcortical or 19
     G_c = 59412
@@ -307,6 +311,11 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f"Run dir: {run_dir}")
 
+    if save_artifacts:
+        artifact_dir = run_dir / 'artifacts' / 'per_epoch'
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy(str(coords_s_path), str(run_dir / 'artifacts' / 'subcortical_coords.npy'))
+
     # save config snapshot
     run_config = {**vars(args), **{k: v for k, v in params.items()
                                    if k in ("tr","lowcut","highcut","filter_order","val_mode","seed")}}
@@ -369,7 +378,18 @@ def main():
             bubble_parc.eval()
         bench_accum = {k: [] for k in args.benchmarks}
 
+        if save_artifacts:
+            G_s = bubble_parc.G_s
+            pred_sum_g    = np.zeros(G_c + G_s, dtype=np.float64)
+            true_sum_g    = np.zeros(G_c + G_s, dtype=np.float64)
+            n_val_windows = 0
+
         with torch.no_grad():
+            if bubble_parc is not None:
+                W_c, W_s = bubble_parc.weights()
+            else:
+                W_c = W_s = None
+
             for x_parc, x_raw, y_parc, y_raw in val_dl:
                 x_parc = x_parc.to(device)
                 y_parc = y_parc.to(device)
@@ -378,21 +398,25 @@ def main():
                     y_raw = y_raw.to(device)
 
                 if bubble_parc is not None:
-                    W_c, W_s = bubble_parc.weights()
-                    x_in     = bubble_parc(x_raw, W_c, W_s)
+                    x_in = bubble_parc(x_raw, W_c, W_s)
                 else:
-                    W_c = W_s = None
                     x_in = x_parc
 
                 dec_in = x_in[:, -1:, :]
                 pred   = model(x_in, dec_in)
 
+                if use_bubbles:
+                    pred_g_full = torch.cat([pred[:, :, :N_c] @ W_c,
+                                             pred[:, :, N_c:] @ W_s], dim=-1)
+                    if save_artifacts:
+                        pred_sum_g += pred_g_full[:, 0, :].sum(0).cpu().float().numpy().astype(np.float64)
+                        true_sum_g += y_raw[:, 0, :].sum(0).cpu().float().numpy().astype(np.float64)
+                        n_val_windows += pred.shape[0]
+
                 for bm_key in args.benchmarks:
                     if bm_key == "mmp":
                         if use_bubbles:
-                            pred_g   = torch.cat([pred[:,:,:N_c] @ W_c,
-                                                  pred[:,:,N_c:] @ W_s], dim=-1)
-                            pred_mmp = reparcellate(pred_g, valid_gray_idx, parcel_for_gray, N_parc)
+                            pred_mmp = reparcellate(pred_g_full, valid_gray_idx, parcel_for_gray, N_parc)
                             bench_accum["mmp"].append(mse(pred_mmp, y_parc).item())
                         else:
                             bench_accum["mmp"].append(mse(pred, y_parc).item())
@@ -407,13 +431,22 @@ def main():
                         bench_accum["mc_raw"].append(np.mean(draws))
                     elif bm_key == "full_raw":
                         if use_bubbles:
-                            pred_g = torch.cat([pred[:,:,:N_c] @ W_c,
-                                                pred[:,:,N_c:] @ W_s], dim=-1)
-                            bench_accum["full_raw"].append(mse(pred_g, y_raw).item())
+                            bench_accum["full_raw"].append(mse(pred_g_full, y_raw).item())
                         else:
                             pred_g   = pred[:, :, parcel_for_gray]
                             actual_g = y_raw[:, :, valid_gray_idx]
                             bench_accum["full_raw"].append(mse(pred_g, actual_g).item())
+
+        if save_artifacts and n_val_windows > 0:
+            np.savez(
+                artifact_dir / f'epoch_{epoch:03d}.npz',
+                centers_c=bubble_parc.C_c.detach().cpu().numpy(),
+                log_r_c=bubble_parc.log_r_c.detach().cpu().numpy(),
+                centers_s=bubble_parc.C_s.detach().cpu().numpy(),
+                log_r_s=bubble_parc.log_r_s.detach().cpu().numpy(),
+                pred_intensities=(pred_sum_g / n_val_windows).astype(np.float32),
+                true_intensities=(true_sum_g / n_val_windows).astype(np.float32),
+            )
 
         bench_str = "  ".join(f"{k}: {np.mean(v):.4f}" for k, v in bench_accum.items() if v)
         print(f"Epoch {epoch:>2}  train {mode_str}: {np.mean(train_losses):.4f}  |  {bench_str}")

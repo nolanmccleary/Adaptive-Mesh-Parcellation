@@ -54,7 +54,7 @@ def parse_args():
 
     p.add_argument("--download",     action="store_true",
                    help="Download and preprocess all sessions after writing the manifest")
-    p.add_argument("--cache_dir",    default="data/",
+    p.add_argument("--cache_dir",    default="data/cache/",
                    help="Directory for preprocessed npy files (used with --download)")
 
     return p.parse_args()
