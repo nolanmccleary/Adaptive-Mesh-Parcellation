@@ -13,7 +13,7 @@ def _gaussian_weights(centers, log_r, coords):
     b2  = coords.pow(2).sum(1).unsqueeze(0)           # (1, G)
     ab  = centers @ coords.t()                        # (N, G)
     d2  = (a2 + b2 - 2 * ab).clamp(min=0)            # (N, G)
-    m   = r2 * (-d2 / (2 * r2)).exp()                 # (N, G)  — r² scaling: larger bubbles exert more field
+    m   = (-d2 / (2 * r2)).exp()                        # (N, G)
     return m / m.sum(1, keepdim=True).clamp(min=1e-8) # (N, G)
 
 

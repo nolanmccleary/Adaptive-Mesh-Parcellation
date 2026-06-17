@@ -1,4 +1,6 @@
 venv/
+wandb.txt
+wandb/
 data/
 __pycache__/
 aws_token.txt
